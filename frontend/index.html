@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Exam Proctoring Client</title>
+  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+
+  <style>
+    body { display: flex; flex-direction: column; align-items: center; }
+    canvas, video { border: 1px solid black; margin: 5px; }
+  </style>
+</head>
+<body>
+  <h2>Exam Proctoring Client — Head Pose Demo</h2>
+  <video id="input_video" width="640" height="480" autoplay muted></video>
+  <canvas id="output_canvas" width="640" height="480"></canvas>
+
+  <script>
+    let cvReady = false;
+    let modelPoints, cameraMatrix, distCoeffs;
+
+    function onOpenCvReady() {
+      console.log('OpenCV.js is ready!');
+      cvReady = true;
+    }
+
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+
+    // Throttle for reporting events
+    let lastReportTimes = {};
+    function reportEvent(eventType, details = {}, cooldown = 1000) {
+      const now = Date.now();
+      if (!lastReportTimes[eventType] || now - lastReportTimes[eventType] > cooldown) {
+        lastReportTimes[eventType] = now;
+        fetch('http://127.0.0.1:8000/report-event', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ eventType, details, timestamp: now })
+        }).catch(err => console.error("Error reporting event:", err));
+      }
+    }
+
+    function waitForCvReady() {
+      return new Promise(resolve => {
+        if (cvReady) resolve();
+        else {
+          let interval = setInterval(() => {
+            if (cvReady) {
+              clearInterval(interval);
+              resolve();
+            }
+          }, 100);
+        }
+      });
+    }
+
+    waitForCvReady().then(() => {
+      // Initialize 3D model points after OpenCV is ready
+      modelPoints = cv.matFromArray(6, 3, cv.CV_64FC1, [
+        0.0, 0.0, 0.0,        // Nose tip
+        0.0, -63.6, -12.5,    // Chin
+        -43.3, 32.7, -26.0,   // Left eye left corner
+        43.3, 32.7, -26.0,    // Right eye right corner
+        -28.9, -28.9, -20.0,  // Left Mouth corner
+        28.9, -28.9, -20.0    // Right mouth corner
+      ]);
+
+      const focal_length = 640;
+      const center = [canvasElement.width / 2, canvasElement.height / 2];
+      cameraMatrix = cv.matFromArray(3, 3, cv.CV_64FC1, [
+        focal_length, 0, center[0],
+        0, focal_length, center[1],
+        0, 0, 1
+      ]);
+      distCoeffs = cv.Mat.zeros(5, 1, cv.CV_64FC1); // 5 params now
+
+      const faceMesh = new FaceMesh({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+      });
+
+      faceMesh.setOptions({
+        maxNumFaces: 1,
+        refineLandmarks: true,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+
+      faceMesh.onResults(onResults);
+
+      const camera = new Camera(videoElement, {
+        onFrame: async () => {
+          await faceMesh.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480
+      });
+      camera.start();
+
+      function onResults(results) {
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+        if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+          const landmarks = results.multiFaceLandmarks[0];
+
+          // FIXED: swapped eye landmarks corrected
+          const imagePoints = cv.matFromArray(6, 2, cv.CV_64FC1, [
+            landmarks[1].x * canvasElement.width, landmarks[1].y * canvasElement.height,       // Nose tip
+            landmarks[152].x * canvasElement.width, landmarks[152].y * canvasElement.height,   // Chin
+            landmarks[33].x * canvasElement.width, landmarks[33].y * canvasElement.height,     // Left eye left corner
+            landmarks[263].x * canvasElement.width, landmarks[263].y * canvasElement.height,   // Right eye right corner
+            landmarks[287].x * canvasElement.width, landmarks[287].y * canvasElement.height,   // Left Mouth corner
+            landmarks[57].x * canvasElement.width, landmarks[57].y * canvasElement.height      // Right mouth corner
+          ]);
+
+          let rvec = new cv.Mat();
+          let tvec = new cv.Mat();
+          let success = cv.solvePnP(modelPoints, imagePoints, cameraMatrix, distCoeffs, rvec, tvec);
+
+          if (success) {
+            let rmat = new cv.Mat();
+            cv.Rodrigues(rvec, rmat);
+
+            let sy = Math.sqrt(rmat.doubleAt(0,0) * rmat.doubleAt(0,0) + rmat.doubleAt(1,0) * rmat.doubleAt(1,0));
+            let singular = sy < 1e-6;
+            let x, y, z;
+            if (!singular) {
+              x = Math.atan2(rmat.doubleAt(2,1), rmat.doubleAt(2,2));
+              y = Math.atan2(-rmat.doubleAt(2,0), sy);
+              z = Math.atan2(rmat.doubleAt(1,0), rmat.doubleAt(0,0));
+            } else {
+              x = Math.atan2(-rmat.doubleAt(1,2), rmat.doubleAt(1,1));
+              y = Math.atan2(-rmat.doubleAt(2,0), sy);
+              z = 0;
+            }
+
+            let pitch = x * 180 / Math.PI;
+            let yaw = y * 180 / Math.PI;
+            let roll = z * 180 / Math.PI;
+
+            canvasCtx.fillStyle = "yellow";
+            canvasCtx.font = "18px Arial";
+            canvasCtx.fillText(`Pitch: ${pitch.toFixed(1)}°`, 10, 20);
+            canvasCtx.fillText(`Yaw: ${yaw.toFixed(1)}°`, 10, 40);
+            canvasCtx.fillText(`Roll: ${roll.toFixed(1)}°`, 10, 60);
+
+            if (Math.abs(yaw) > 30) reportEvent('head_turned', { yaw: yaw.toFixed(1) });
+            if (pitch < -20) reportEvent('head_down', { pitch: pitch.toFixed(1) });
+
+            drawConnectors(canvasCtx, landmarks, FACEMESH_TESSELATION, { color: '#C0C0C070', lineWidth: 1 });
+            drawLandmarks(canvasCtx, landmarks, { color: '#FF3030', lineWidth: 1 });
+
+            drawAxis(rvec, tvec, cameraMatrix, distCoeffs);
+            rmat.delete();
+          }
+          rvec.delete();
+          tvec.delete();
+          imagePoints.delete();
+        } else {
+          reportEvent('face_missing');
+        }
+        canvasCtx.restore();
+      }
+
+      function drawAxis(rvec, tvec, cameraMatrix, distCoeffs) {
+        const axisLength = 50;
+        let axisPoints = cv.matFromArray(4, 3, cv.CV_64FC1, [
+          0, 0, 0,
+          axisLength, 0, 0,
+          0, axisLength, 0,
+          0, 0, axisLength
+        ]);
+
+        let imagePoints = new cv.Mat();
+        cv.projectPoints(axisPoints, rvec, tvec, cameraMatrix, distCoeffs, imagePoints);
+
+        const origin = { x: imagePoints.data64F[0], y: imagePoints.data64F[1] };
+        const xAxis = { x: imagePoints.data64F[2], y: imagePoints.data64F[3] };
+        const yAxis = { x: imagePoints.data64F[4], y: imagePoints.data64F[5] };
+        const zAxis = { x: imagePoints.data64F[6], y: imagePoints.data64F[7] };
+
+        canvasCtx.strokeStyle = "red";
+        canvasCtx.beginPath(); canvasCtx.moveTo(origin.x, origin.y); canvasCtx.lineTo(xAxis.x, xAxis.y); canvasCtx.stroke();
+        canvasCtx.strokeStyle = "green";
+        canvasCtx.beginPath(); canvasCtx.moveTo(origin.x, origin.y); canvasCtx.lineTo(yAxis.x, yAxis.y); canvasCtx.stroke();
+        canvasCtx.strokeStyle = "blue";
+        canvasCtx.beginPath(); canvasCtx.moveTo(origin.x, origin.y); canvasCtx.lineTo(zAxis.x, zAxis.y); canvasCtx.stroke();
+
+        axisPoints.delete();
+        imagePoints.delete();
+      }
+    });
+  </script>
+</body>
+</html>
