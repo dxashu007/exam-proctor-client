@@ -37,7 +37,7 @@
       const now = Date.now();
       if (!lastReportTimes[eventType] || now - lastReportTimes[eventType] > cooldown) {
         lastReportTimes[eventType] = now;
-        fetch('https://exam-proctor-client.onrender.com/report-event2', {  
+        fetch('https://exam-proctor-client.onrender.com/report-event', {  
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ eventType, details, timestamp: now })
