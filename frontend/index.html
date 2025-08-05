@@ -20,7 +20,7 @@
     let cvReady = false;
     let modelPoints, cameraMatrix, distCoeffs;
     let lastFacePosition = null;
-    let facePositionThreshold = 50; // pixels
+    let facePositionThreshold = 50;
 
     function onOpenCvReady() {
       console.log('OpenCV.js is ready!');
@@ -75,10 +75,10 @@
       modelPoints = cv.matFromArray(6, 3, cv.CV_64FC1, [
         0.0, 0.0, 0.0,        // Nose tip
         0.0, -63.6, -12.5,    // Chin
-        -43.3, 32.7, -26.0,   // Left eye left corner
-        43.3, 32.7, -26.0,    // Right eye right corner
-        -28.9, -28.9, -20.0,  // Left Mouth corner
-        28.9, -28.9, -20.0    // Right mouth corner
+        -43.3, 32.7, -26.0,   // Left eye
+        43.3, 32.7, -26.0,    // Right eye
+        -28.9, -28.9, -20.0,  // Left mouth
+        28.9, -28.9, -20.0    // Right mouth
       ]);
 
       const focal_length = 640;
@@ -169,7 +169,6 @@
             let yaw = y * 180 / Math.PI;
             let roll = z * 180 / Math.PI;
 
-            // Normalize roll
             if (roll > 90) roll -= 180;
             if (roll < -90) roll += 180;
 
@@ -182,19 +181,15 @@
             console.log("[poseCheck]", { faceMoved, yaw, pitch });
 
             if (!faceMoved) {
-              if (Math.abs(yaw) > 30) {
+              if (pitch < -20) {
+                console.log("→ Trigger: head_up");
+                reportEvent('head_up', { pitch: pitch.toFixed(1) }, 1500);
+              } else if (pitch > 20) {
+                console.log("→ Trigger: head_down");
+                reportEvent('head_down', { pitch: pitch.toFixed(1) }, 1500);
+              } else if (Math.abs(yaw) > 30) {
                 console.log("→ Trigger: head_turned");
                 reportEvent('head_turned', { yaw: yaw.toFixed(1) }, 1000);
-              }
-
-              if (pitch < -20) {
-                console.log("→ Trigger: head_down");
-                reportEvent('head_down', { pitch: pitch.toFixed(1) }, 1000);
-              }
-
-              if (pitch > 20) {
-                console.log("→ Trigger: head_up");
-                reportEvent('head_up', { pitch: pitch.toFixed(1) }, 1000);
               }
             } else {
               console.log("[poseCheck] Skipped due to face movement");
@@ -202,17 +197,18 @@
 
             drawConnectors(canvasCtx, landmarks, FACEMESH_TESSELATION, { color: '#6fa8dc', lineWidth: 1 });
             drawLandmarks(canvasCtx, landmarks, { color: '#FF3030', lineWidth: 1 });
-
             drawAxis(rvec, tvec, cameraMatrix, distCoeffs);
             rmat.delete();
           }
+
           rvec.delete();
           tvec.delete();
           imagePoints.delete();
         } else {
           console.log("[poseCheck] No face detected — reporting face_missing");
-          reportEvent('face_missing');
+          reportEvent('face_missing', {}, 3000);
         }
+
         canvasCtx.restore();
       }
 
