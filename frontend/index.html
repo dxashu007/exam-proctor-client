@@ -21,6 +21,7 @@
     let modelPoints, cameraMatrix, distCoeffs;
     let lastFacePosition = null;
     let facePositionThreshold = 50;
+    let lastPose = null;
 
     function onOpenCvReady() {
       console.log('OpenCV.js is ready!');
@@ -57,6 +58,34 @@
       }
     }
 
+    function classifyPose(yaw, pitch) {
+      const absYaw = Math.abs(yaw);
+      const absPitch = Math.abs(pitch);
+
+      const yawThreshold = 30;
+      const pitchThreshold = 10;
+
+      let pose = 'head_centered';
+
+      if (absYaw > yawThreshold && absPitch > pitchThreshold) {
+        const dominant = absYaw - yawThreshold > absPitch - pitchThreshold ? 'yaw' : 'pitch';
+        if (dominant === 'yaw') {
+          pose = yaw > 0 ? 'head_right' : 'head_left'; // ✅ Fixed
+        } else {
+          pose = pitch > 0 ? 'head_down' : 'head_up';
+        }
+      } else if (absYaw > yawThreshold) {
+        pose = yaw > 0 ? 'head_right' : 'head_left'; // ✅ Fixed
+      } else if (absPitch > pitchThreshold) {
+        pose = pitch > 0 ? 'head_down' : 'head_up';
+      }
+
+      if (pose !== lastPose) {
+        reportEvent(pose, { pitch: pitch.toFixed(1), yaw: yaw.toFixed(1) }, 1000);
+        lastPose = pose;
+      }
+    }
+
     function waitForCvReady() {
       return new Promise(resolve => {
         if (cvReady) resolve();
@@ -73,12 +102,12 @@
 
     waitForCvReady().then(() => {
       modelPoints = cv.matFromArray(6, 3, cv.CV_64FC1, [
-        0.0, 0.0, 0.0,        // Nose tip
-        0.0, -63.6, -12.5,    // Chin
-        -43.3, 32.7, -26.0,   // Left eye
-        43.3, 32.7, -26.0,    // Right eye
-        -28.9, -28.9, -20.0,  // Left mouth
-        28.9, -28.9, -20.0    // Right mouth
+        0.0, 0.0, 0.0,
+        0.0, -63.6, -12.5,
+        -43.3, 32.7, -26.0,
+        43.3, 32.7, -26.0,
+        -28.9, -28.9, -20.0,
+        28.9, -28.9, -20.0
       ]);
 
       const focal_length = 640;
@@ -112,6 +141,10 @@
       });
       camera.start();
 
+      function clamp(val, min, max) {
+        return Math.max(min, Math.min(max, val));
+      }
+
       function onResults(results) {
         canvasCtx.save();
         canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
@@ -119,21 +152,6 @@
 
         if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
           const landmarks = results.multiFaceLandmarks[0];
-
-          const nose = landmarks[1];
-          const faceCenter = {
-            x: nose.x * canvasElement.width,
-            y: nose.y * canvasElement.height
-          };
-
-          let faceMoved = false;
-          if (lastFacePosition) {
-            const dx = faceCenter.x - lastFacePosition.x;
-            const dy = faceCenter.y - lastFacePosition.y;
-            const dist = Math.sqrt(dx * dx + dy * dy);
-            faceMoved = dist > facePositionThreshold;
-          }
-          lastFacePosition = faceCenter;
 
           const imagePoints = cv.matFromArray(6, 2, cv.CV_64FC1, [
             landmarks[1].x * canvasElement.width, landmarks[1].y * canvasElement.height,
@@ -165,12 +183,9 @@
               z = 0;
             }
 
-            let pitch = x * 180 / Math.PI;
-            let yaw = y * 180 / Math.PI;
-            let roll = z * 180 / Math.PI;
-
-            if (roll > 90) roll -= 180;
-            if (roll < -90) roll += 180;
+            let pitch = clamp(x * 180 / Math.PI, -90, 90);
+            let yaw = clamp(y * 180 / Math.PI, -90, 90);
+            let roll = clamp(z * 180 / Math.PI, -90, 90);
 
             canvasCtx.fillStyle = "yellow";
             canvasCtx.font = "18px Arial";
@@ -178,22 +193,7 @@
             canvasCtx.fillText(`Yaw: ${yaw.toFixed(1)}°`, 10, 40);
             canvasCtx.fillText(`Roll: ${roll.toFixed(1)}°`, 10, 60);
 
-            console.log("[poseCheck]", { faceMoved, yaw, pitch });
-
-            if (!faceMoved) {
-              if (pitch < -20) {
-                console.log("→ Trigger: head_up");
-                reportEvent('head_up', { pitch: pitch.toFixed(1) }, 1500);
-              } else if (pitch > 20) {
-                console.log("→ Trigger: head_down");
-                reportEvent('head_down', { pitch: pitch.toFixed(1) }, 1500);
-              } else if (Math.abs(yaw) > 30) {
-                console.log("→ Trigger: head_turned");
-                reportEvent('head_turned', { yaw: yaw.toFixed(1) }, 1000);
-              }
-            } else {
-              console.log("[poseCheck] Skipped due to face movement");
-            }
+            classifyPose(yaw, pitch);
 
             drawConnectors(canvasCtx, landmarks, FACEMESH_TESSELATION, { color: '#6fa8dc', lineWidth: 1 });
             drawLandmarks(canvasCtx, landmarks, { color: '#FF3030', lineWidth: 1 });
